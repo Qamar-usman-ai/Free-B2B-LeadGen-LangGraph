@@ -2,26 +2,37 @@ import streamlit as st
 import time
 import pandas as pd
 from io import BytesIO
-from typing import TypedDict, List
+from typing import TypedDict, List, Optional
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 
+# ڈک ڈک گو سرچ ہینڈلر
 try:
     from duckduckgo_search import DDGS
     DDG_AVAILABLE = True
 except ImportError:
     DDG_AVAILABLE = False
 
-# 1. لینگ گراف اسٹیٹ
+# 🔴 1. پیڈانٹک اسکیما (Pydantic Schema for Guaranteed Structured Data)
+# یہ ماڈل کو مجبور کرتا ہے کہ وہ ڈیٹا لازمی نکالے
+class CompanyDetails(BaseModel):
+    Founder_or_CEO: str = Field(description="The name of the Founder, CEO, or Managing Director. Write 'Not Found' if missing.")
+    Category: str = Field(description="Business domain or industry category like Clothing, Electronics, IT, FMCG. Write 'Not Found' if missing.")
+    Parent_Company: str = Field(description="Name of the parent organization. If independent, write 'Independent'.")
+    Business_Email: str = Field(description="The corporate or official business/support email address. Write 'Not Found' if missing.")
+    Website: str = Field(description="The official website URL. Write 'Not Found' if missing.")
+
+# لینگ گراف اسٹیٹ
 class ResearchState(TypedDict):
     items_list: List[str]
     current_index: int
     search_method: str
     all_data: List[dict]
 
-st.set_page_config(page_title="AI Lead & Brand Researcher", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="AI Lead & Brand Researcher Pro", page_icon="🚀", layout="wide")
 
-st.title("🚀 AI Lead & Brand Researcher")
+st.title("🚀 AI Lead & Brand Researcher Pro")
 st.write("کمپنیوں یا برانڈز کی لسٹ داخل کریں اور ان کا بزنس ڈیٹا خود بخود حاصل کریں۔")
 
 # --- سائیڈ بار ---
@@ -56,87 +67,70 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             os.environ["TAVILY_API_KEY"] = tavily_key
 
         try:
-            # ٹمپریچر تھوڑا بڑھایا تاکہ ماڈل کھل کر ٹیکسٹ لکھے، جے سن کی ٹینشن نہ لے
-            llm = ChatGroq(model=model_choice, temperature=0.2)
+            # 🔴 ایڈوانسڈ ماڈل بائنڈنگ (Structured Output Integration)
+            base_llm = ChatGroq(model=model_choice, temperature=0.0)
+            structured_llm = base_llm.with_structured_output(CompanyDetails)
 
             def research_node(state: ResearchState):
                 idx = state["current_index"]
                 current_item = state["items_list"][idx]
                 
-                status_text.text(f"🔍 [{idx + 1}/{len(state['items_list'])}] پر تحقیق جاری ہے: {current_item}")
+                status_text.text(f"🔍 [{idx + 1}/{len(state['items_list'])}] پر انٹرنیٹ ریسرچ جاری ہے: {current_item}")
                 progress_bar.progress((idx + 1) / len(state['items_list']))
                 
-                query = f"{current_item} company brand founder CEO contact email website"
+                # سرچ کوئری کو زیادہ مخصوص کر دیا گیا ہے تاکہ فالتو کچرا ٹیکسٹ نہ آئے
+                query = f"{current_item} official website founder CEO email contact"
                 search_results = ""
 
-                # سرچ لاجک
+                # سرچ کرنا
                 try:
                     if state["search_method"] == "Tavily Search API":
                         from langchain_community.tools.tavily_search import TavilySearchResults
-                        search_tool = TavilySearchResults(max_results=3)
+                        search_tool = TavilySearchResults(max_results=2)
                         res = search_tool.invoke({"query": query})
                         search_results = str(res)
                     else:
                         with DDGS() as ddgs:
-                            results = [r for r in ddgs.text(query, max_results=3)]
-                            search_results = str(results)
+                            results = [r for r in ddgs.text(query, max_results=2)]
+                            # صرف اہم ٹیکسٹ رکھنے کے لیے باڈی اسٹرکشن
+                            search_results = " ".join([f"{r.get('title','')}: {r.get('body','')}" for r in results])
                 except Exception as e:
-                    search_results = f"Search engine failed: {str(e)}"
+                    search_results = f"Search token/limit issue: {str(e)}"
 
-                # 🔴 نیا پرامپٹ: ہم جے سن نہیں مانگ رہے، صرف سادہ ٹیکسٹ لائنز مانگ رہے ہیں
-                prompt = f"""
-                Analyze the web search results for the entity '{current_item}' and extract the following details.
-                Provide the answer EXACTLY in this flat text format, line by line. Do not write intro, outro, or markdown code blocks.
-
-                Founder_or_CEO: [Extract CEO name or write Not Found]
-                Category: [Extract business category or write Not Found]
-                Parent_Company: [Extract parent company or write Independent]
-                Business_Email: [Extract email address or write Not Found]
-                Website: [Extract official URL or write Not Found]
-
-                Web Search Data:
+                # پرامپٹ کو بالکل کلین کر دیا گیا ہے
+                prompt = f"""You are a data intelligence agent. Extract accurate facts about '{current_item}' from the following search web text.
+                
+                Search Web Text:
                 {search_results}
                 """
                 
-                # ڈیفالٹ محفوظ ڈیٹا سٹرکچر
-                item_data = {
-                    "Name": current_item,
-                    "Founder_or_CEO": "Not Found",
-                    "Category": "Not Found",
-                    "Parent_Company": "Independent",
-                    "Business_Email": "Not Found",
-                    "Website": "Not Found"
-                }
-
                 try:
-                    response = llm.invoke(prompt)
-                    raw_text = response.content.strip()
+                    # 🔴 اب ماڈل فنکشن کالنگ کے ذریعے ڈائریکٹ ہماری کلاس کے سٹرکچر میں ڈیٹا بھرے گا
+                    extracted_obj = structured_llm.invoke(prompt)
                     
-                    # 🔴 پائتھون کلیننگ انجن (Python Cleaning Logic)
-                    # یہ لائن بائی لائن ٹیکسٹ کو پڑھے گا اور ڈیٹا الگ کرے گا
-                    for line in raw_text.split("\n"):
-                        line = line.strip()
-                        if ":" in line:
-                            key, val = line.split(":", 1)
-                            key = key.strip()
-                            val = val.strip().replace("[", "").replace("]", "") # بریکٹس صاف کرنا
-                            
-                            if "Founder_or_CEO" in key:
-                                item_data["Founder_or_CEO"] = val if val else "Not Found"
-                            elif "Category" in key:
-                                item_data["Category"] = val if val else "Not Found"
-                            elif "Parent_Company" in key:
-                                item_data["Parent_Company"] = val if val else "Independent"
-                            elif "Business_Email" in key:
-                                item_data["Business_Email"] = val if val else "Not Found"
-                            elif "Website" in key:
-                                item_data["Website"] = val if val else "Not Found"
-                except Exception as e:
-                    # اگر کچھ بھی فیل ہو، تو کم از کم ایپ نہیں رکے گی
-                    pass
+                    item_data = {
+                        "Name": current_item,
+                        "Founder_or_CEO": extracted_obj.Founder_or_CEO,
+                        "Category": extracted_obj.Category,
+                        "Parent_Company": extracted_obj.Parent_Company,
+                        "Business_Email": extracted_obj.Business_Email,
+                        "Website": extracted_obj.Website
+                    }
+                except Exception as llm_error:
+                    # اگر ریٹ لیمیٹ کا پکا بلاک آ جائے تو صارف کو وارننگ دیں
+                    item_data = {
+                        "Name": current_item,
+                        "Founder_or_CEO": "Rate Limit / Blocked",
+                        "Category": "Groq Key Overloaded",
+                        "Parent_Company": "Independent",
+                        "Business_Email": "Not Found",
+                        "Website": "Not Found"
+                    }
 
                 updated_data = state["all_data"] + [item_data]
-                time.sleep(2) 
+                
+                # ⏱️ اہم سیکیورٹی وقفہ: تاکہ Groq فری ٹیر بلاک نہ کرے
+                time.sleep(3) 
                 
                 return {
                     "all_data": updated_data,
@@ -148,7 +142,7 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                     return "continue"
                 return "end"
 
-            # گراف بلڈ کرنا
+            # گراف بنانا
             workflow = StateGraph(ResearchState)
             workflow.add_node("research", research_node)
             workflow.set_entry_point("research")
@@ -156,6 +150,7 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             app = workflow.compile()
 
             progress_bar = st.progress(0)
+            st_error_box = st.empty()
             status_text = st.empty()
             
             initial_inputs = {
@@ -166,13 +161,13 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             }
             
             final_output = app.invoke(initial_inputs)
-            status_text.success("✅ تحقیق مکمل ہو گئی!")
+            status_text.success("✅ فائنل رپورٹ تیار ہے!")
             
             df = pd.DataFrame(final_output["all_data"])
             st.subheader("📊 حاصل کردہ نتائج (Results)")
             st.dataframe(df, use_container_width=True)
             
-            # Excel ڈاؤن لوڈ
+            # Excel شیٹ بنانا
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name='Leads_Data')
@@ -186,4 +181,4 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             )
 
         except Exception as global_err:
-            st.error(f"💥 خرابی آئی: {str(global_err)}")
+            st.error(f"💥 چلانے کے دوران خرابی آئی: {str(global_err)}")
