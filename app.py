@@ -6,8 +6,10 @@ from io import BytesIO
 from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
+# 🔴 فکس کے لیے اہم لائبریریز امپورٹ کی گئی ہیں
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.prompts import PromptTemplate
 
-# DuckDuckGo امپورٹ کی سیکیورٹی
 try:
     from duckduckgo_search import DDGS
     DDG_AVAILABLE = True
@@ -58,7 +60,11 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             os.environ["TAVILY_API_KEY"] = tavily_key
 
         try:
-            llm = ChatGroq(model=model_choice, temperature=0.0) # Temperature 0.0 تاکہ ماڈل لکیر کا فقیر رہے اور JSON خراب نہ کرے
+            # ماڈل لوڈ کریں
+            llm = ChatGroq(model=model_choice, temperature=0.0)
+            
+            # 🔴 آفیشل جے سن پارسر کا سیٹ اپ
+            parser = JsonOutputParser()
 
             def research_node(state: ResearchState):
                 idx = state["current_index"]
@@ -70,7 +76,6 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                 query = f"{current_item} company brand founder CEO contact email website"
                 search_results = ""
 
-                # سرچ انجن رن کرنا
                 try:
                     if state["search_method"] == "Tavily Search API":
                         from langchain_community.tools.tavily_search import TavilySearchResults
@@ -84,49 +89,52 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                 except Exception as e:
                     search_results = f"Search engine failed: {str(e)}"
 
-                # پرامپٹ کو انتہائی سخت (Strict) کر دیا گیا ہے
-                prompt = f"""
-                You are a data extraction assistant. Analyze the text data provided and extract the details for the entity '{current_item}'.
+                # 🔴 پرامپٹ ٹیمپلیٹ کے ساتھ فارمیٹ انسٹرکشنز کا اضافہ
+                template = """You are an expert data scraper. Analyze the text data provided below and extract the business details for the entity '{current_item}'.
                 
                 Text Data: {search_results}
                 
-                You must return ONLY a JSON object. No conversational text, no explanations, no markdown formatting, no backticks.
+                {format_instructions}
                 
-                Desired JSON Structure:
-                {{
-                    "Name": "{current_item}",
-                    "Founder_or_CEO": "Extract CEO name or write Not Found",
-                    "Category": "Extract business category or write Not Found",
-                    "Parent_Company": "Extract parent company or write Independent",
-                    "Business_Email": "Extract email address or write Not Found",
-                    "Website": "Extract official URL or write Not Found"
-                }}
+                Make sure you extract actual data from the text. If any value is completely missing, write "Not Found". Do not make up fake data.
                 """
                 
+                # پارسر خود بخود ماڈل کو بتائے گا کہ جے سن کا سٹرکچر کیا ہونا چاہیے
+                prompt = PromptTemplate(
+                    template=template,
+                    input_variables=["current_item", "search_results"],
+                    partial_variables={"format_instructions": parser.get_format_instructions()},
+                )
+                
+                # چین (Chain) بنانا
+                chain = prompt | llm | parser
+
                 try:
-                    response = llm.invoke(prompt)
-                    clean_content = response.content.strip()
+                    # اب ماڈل ڈائریکٹ درست پائتھون ڈکشنری واپس کرے گا، پارسنگ کی ضرورت نہیں پڑے گی
+                    item_data = chain.invoke({"current_item": current_item, "search_results": search_results})
                     
-                    # 🛠️ ایڈوانسڈ جے سن کلیننگ (JSON Cleaning): اگر ماڈل پھر بھی markdown بلاکس بنا دے
-                    if "```json" in clean_content:
-                        clean_content = clean_content.split("```json")[1].split("```")[0].strip()
-                    elif "```" in clean_content:
-                        clean_content = clean_content.split("```")[1].strip()
-                        
-                    item_data = json.loads(clean_content)
-                except Exception as parse_error:
-                    # اگر جے سن پارس نہ ہو سکے تو سرچ کے کچے ڈیٹا میں سے کچھ نہ کچھ نکالنے کی کوشش کریں
-                    item_data = {
+                    # یہ یقینی بنانا کہ کالمز کے نام وہی رہیں جو ہمیں چاہئیں
+                    final_mapped_data = {
+                        "Name": item_data.get("Name", current_item) or item_data.get("Name", current_item),
+                        "Founder_or_CEO": item_data.get("Founder_or_CEO", "Not Found") or item_data.get("founder_or_ceo", "Not Found"),
+                        "Category": item_data.get("Category", "Not Found") or item_data.get("category", "Not Found"),
+                        "Parent_Company": item_data.get("Parent_Company", "Independent") or item_data.get("parent_company", "Independent"),
+                        "Business_Email": item_data.get("Business_Email", "Not Found") or item_data.get("business_email", "Not Found"),
+                        "Website": item_data.get("Website", "Not Found") or item_data.get("website", "Not Found")
+                    }
+                except Exception as e:
+                    # اگر ماڈل پھر بھی فیل ہو تو کچے سرچ ڈیٹا کو محفوظ رکھیں
+                    final_mapped_data = {
                         "Name": current_item,
-                        "Founder_or_CEO": "Parsing Error",
-                        "Category": "Check API Keys",
-                        "Parent_Company": "Error",
+                        "Founder_or_CEO": "LLM Refused to answer",
+                        "Category": "Data Error",
+                        "Parent_Company": "Independent",
                         "Business_Email": "Not Found",
-                        "Website": "Failed to Parse Model Output"
+                        "Website": "Not Found"
                     }
 
-                updated_data = state["all_data"] + [item_data]
-                time.sleep(2) # ریٹ لمٹ سیفٹی
+                updated_data = state["all_data"] + [final_mapped_data]
+                time.sleep(2) 
                 
                 return {
                     "all_data": updated_data,
