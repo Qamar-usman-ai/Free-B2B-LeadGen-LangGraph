@@ -109,10 +109,11 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                 try:
                     response = llm.invoke(prompt)
                     clean_content = response.content.strip()
-                    # اگر ماڈل نے غلطی سے مارک ڈاؤن کوڈ بلاک ایڈ کر دیا ہو تو اسے صاف کریں
+                    
+                    # فکسڈ لائن 114 ایرر: سنگل لائن رپلیسمنٹ لاجک کا استعمال
                     if clean_content.startswith("```"):
-                        clean_content = clean_content.replace("
-```json", "").replace("```", "").strip()
+                        clean_content = clean_content.replace("```json", "").replace("```", "").strip()
+                        
                     item_data = json.loads(clean_content)
                 except Exception as e:
                     item_data = {
