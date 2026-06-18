@@ -1,14 +1,10 @@
 import streamlit as st
-import json
 import time
 import pandas as pd
 from io import BytesIO
 from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
-# 🔴 فکس کے لیے اہم لائبریریز امپورٹ کی گئی ہیں
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
 
 try:
     from duckduckgo_search import DDGS
@@ -60,11 +56,8 @@ if st.button("تحقیق شروع کریں (Start Research)"):
             os.environ["TAVILY_API_KEY"] = tavily_key
 
         try:
-            # ماڈل لوڈ کریں
-            llm = ChatGroq(model=model_choice, temperature=0.0)
-            
-            # 🔴 آفیشل جے سن پارسر کا سیٹ اپ
-            parser = JsonOutputParser()
+            # ٹمپریچر تھوڑا بڑھایا تاکہ ماڈل کھل کر ٹیکسٹ لکھے، جے سن کی ٹینشن نہ لے
+            llm = ChatGroq(model=model_choice, temperature=0.2)
 
             def research_node(state: ResearchState):
                 idx = state["current_index"]
@@ -76,6 +69,7 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                 query = f"{current_item} company brand founder CEO contact email website"
                 search_results = ""
 
+                # سرچ لاجک
                 try:
                     if state["search_method"] == "Tavily Search API":
                         from langchain_community.tools.tavily_search import TavilySearchResults
@@ -89,51 +83,59 @@ if st.button("تحقیق شروع کریں (Start Research)"):
                 except Exception as e:
                     search_results = f"Search engine failed: {str(e)}"
 
-                # 🔴 پرامپٹ ٹیمپلیٹ کے ساتھ فارمیٹ انسٹرکشنز کا اضافہ
-                template = """You are an expert data scraper. Analyze the text data provided below and extract the business details for the entity '{current_item}'.
-                
-                Text Data: {search_results}
-                
-                {format_instructions}
-                
-                Make sure you extract actual data from the text. If any value is completely missing, write "Not Found". Do not make up fake data.
+                # 🔴 نیا پرامپٹ: ہم جے سن نہیں مانگ رہے، صرف سادہ ٹیکسٹ لائنز مانگ رہے ہیں
+                prompt = f"""
+                Analyze the web search results for the entity '{current_item}' and extract the following details.
+                Provide the answer EXACTLY in this flat text format, line by line. Do not write intro, outro, or markdown code blocks.
+
+                Founder_or_CEO: [Extract CEO name or write Not Found]
+                Category: [Extract business category or write Not Found]
+                Parent_Company: [Extract parent company or write Independent]
+                Business_Email: [Extract email address or write Not Found]
+                Website: [Extract official URL or write Not Found]
+
+                Web Search Data:
+                {search_results}
                 """
                 
-                # پارسر خود بخود ماڈل کو بتائے گا کہ جے سن کا سٹرکچر کیا ہونا چاہیے
-                prompt = PromptTemplate(
-                    template=template,
-                    input_variables=["current_item", "search_results"],
-                    partial_variables={"format_instructions": parser.get_format_instructions()},
-                )
-                
-                # چین (Chain) بنانا
-                chain = prompt | llm | parser
+                # ڈیفالٹ محفوظ ڈیٹا سٹرکچر
+                item_data = {
+                    "Name": current_item,
+                    "Founder_or_CEO": "Not Found",
+                    "Category": "Not Found",
+                    "Parent_Company": "Independent",
+                    "Business_Email": "Not Found",
+                    "Website": "Not Found"
+                }
 
                 try:
-                    # اب ماڈل ڈائریکٹ درست پائتھون ڈکشنری واپس کرے گا، پارسنگ کی ضرورت نہیں پڑے گی
-                    item_data = chain.invoke({"current_item": current_item, "search_results": search_results})
+                    response = llm.invoke(prompt)
+                    raw_text = response.content.strip()
                     
-                    # یہ یقینی بنانا کہ کالمز کے نام وہی رہیں جو ہمیں چاہئیں
-                    final_mapped_data = {
-                        "Name": item_data.get("Name", current_item) or item_data.get("Name", current_item),
-                        "Founder_or_CEO": item_data.get("Founder_or_CEO", "Not Found") or item_data.get("founder_or_ceo", "Not Found"),
-                        "Category": item_data.get("Category", "Not Found") or item_data.get("category", "Not Found"),
-                        "Parent_Company": item_data.get("Parent_Company", "Independent") or item_data.get("parent_company", "Independent"),
-                        "Business_Email": item_data.get("Business_Email", "Not Found") or item_data.get("business_email", "Not Found"),
-                        "Website": item_data.get("Website", "Not Found") or item_data.get("website", "Not Found")
-                    }
+                    # 🔴 پائتھون کلیننگ انجن (Python Cleaning Logic)
+                    # یہ لائن بائی لائن ٹیکسٹ کو پڑھے گا اور ڈیٹا الگ کرے گا
+                    for line in raw_text.split("\n"):
+                        line = line.strip()
+                        if ":" in line:
+                            key, val = line.split(":", 1)
+                            key = key.strip()
+                            val = val.strip().replace("[", "").replace("]", "") # بریکٹس صاف کرنا
+                            
+                            if "Founder_or_CEO" in key:
+                                item_data["Founder_or_CEO"] = val if val else "Not Found"
+                            elif "Category" in key:
+                                item_data["Category"] = val if val else "Not Found"
+                            elif "Parent_Company" in key:
+                                item_data["Parent_Company"] = val if val else "Independent"
+                            elif "Business_Email" in key:
+                                item_data["Business_Email"] = val if val else "Not Found"
+                            elif "Website" in key:
+                                item_data["Website"] = val if val else "Not Found"
                 except Exception as e:
-                    # اگر ماڈل پھر بھی فیل ہو تو کچے سرچ ڈیٹا کو محفوظ رکھیں
-                    final_mapped_data = {
-                        "Name": current_item,
-                        "Founder_or_CEO": "LLM Refused to answer",
-                        "Category": "Data Error",
-                        "Parent_Company": "Independent",
-                        "Business_Email": "Not Found",
-                        "Website": "Not Found"
-                    }
+                    # اگر کچھ بھی فیل ہو، تو کم از کم ایپ نہیں رکے گی
+                    pass
 
-                updated_data = state["all_data"] + [final_mapped_data]
+                updated_data = state["all_data"] + [item_data]
                 time.sleep(2) 
                 
                 return {
